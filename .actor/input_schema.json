@@ -1,0 +1,65 @@
+{
+  "title": "Next.co.uk Product Scraper",
+  "description": "Extract products from Next using either a Next URL or a keyword. Supports pagination, location/territory, and proxy configuration.",
+  "type": "object",
+  "schemaVersion": 1,
+  "properties": {
+    "url": {
+      "title": "URL",
+      "type": "string",
+      "description": "Any supported Next page URL, for example https://www.next.co.uk/search?w=shirt or category/shop URLs.",
+      "editor": "textfield",
+      "prefill": "https://www.next.co.uk/search?w=shirt"
+    },
+    "keyword": {
+      "title": "Keyword",
+      "type": "string",
+      "description": "Keyword search term. Used when URL is not provided.",
+      "editor": "textfield",
+      "prefill": "shirt"
+    },
+    "location": {
+      "title": "Location / Territory",
+      "type": "string",
+      "description": "Two-letter territory code (for example GB, OM, PL, AE).",
+      "editor": "textfield",
+      "prefill": "GB"
+    },
+    "language": {
+      "title": "Language",
+      "type": "string",
+      "description": "Two-letter language code (for example en).",
+      "editor": "textfield",
+      "prefill": "en"
+    },
+    "results_wanted": {
+      "title": "Results wanted",
+      "type": "integer",
+      "description": "Maximum number of products to extract.",
+      "minimum": 1,
+      "default": 20,
+      "prefill": 20,
+      "editor": "number"
+    },
+    "max_pages": {
+      "title": "Max pages",
+      "type": "integer",
+      "description": "Maximum number of API pages to request.",
+      "minimum": 1,
+      "default": 10,
+      "prefill": 10,
+      "editor": "number"
+    },
+    "proxyConfiguration": {
+      "title": "Proxy configuration",
+      "type": "object",
+      "description": "Use Apify Proxy for more reliable data extraction.",
+      "editor": "proxy",
+      "default": {
+        "useApifyProxy": false
+      }
+    }
+  },
+  "required": [],
+  "additionalProperties": false
+}

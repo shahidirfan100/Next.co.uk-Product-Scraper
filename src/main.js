@@ -1,0 +1,493 @@
+import { readFile } from 'node:fs/promises';
+
+import { Actor, log } from 'apify';
+import { gotScraping } from 'got-scraping';
+
+const API_BASE_URL = 'https://api.nextdirect.com';
+const DEFAULT_REALM = 'next';
+const DEFAULT_TERRITORY = 'GB';
+const DEFAULT_LANGUAGE = 'en';
+const DEFAULT_RESULTS_WANTED = 20;
+const DEFAULT_MAX_PAGES = 10;
+const MAX_PAGE_SIZE = 100;
+const hasApifyProxyCredentials = Boolean(process.env.APIFY_TOKEN || process.env.APIFY_PROXY_PASSWORD);
+
+const sleep = (ms) => new Promise((resolve) => {
+    setTimeout(resolve, ms);
+});
+
+const toPositiveInt = (value, fallback) => {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+    return Math.floor(parsed);
+};
+
+const cleanString = (value) => {
+    if (typeof value !== 'string') return '';
+    return value.trim();
+};
+
+const normalizeTerritory = (value, fallback) => {
+    const v = cleanString(value).toUpperCase();
+    return v || fallback;
+};
+
+const normalizeLanguage = (value, fallback) => {
+    const v = cleanString(value).toLowerCase();
+    return v || fallback;
+};
+
+const normalizeRealm = (value, fallback) => {
+    const v = cleanString(value).toLowerCase();
+    return v || fallback;
+};
+
+const makeAbsoluteUrl = (value) => {
+    if (!value) return null;
+    try {
+        return new URL(value).href;
+    } catch {
+        return null;
+    }
+};
+
+const hasMeaningfulValue = (value) => {
+    if (value === null || value === undefined) return false;
+    if (typeof value === 'string') return value.trim() !== '';
+    if (Array.isArray(value)) return value.length > 0;
+    if (typeof value === 'object') return Object.keys(value).length > 0;
+    return true;
+};
+
+const mergeInputWithFallback = ({ actorInput, fallbackInput }) => {
+    const merged = { ...fallbackInput };
+
+    for (const [key, value] of Object.entries(actorInput)) {
+        if (hasMeaningfulValue(value)) {
+            merged[key] = value;
+        }
+    }
+
+    return merged;
+};
+
+const readFallbackInputFile = async () => {
+    try {
+        const raw = await readFile('INPUT.json', 'utf8');
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') return parsed;
+    } catch {
+        // Ignore missing or invalid INPUT.json fallback file.
+    }
+
+    return {};
+};
+
+const loadInputWithFallback = async () => {
+    const actorInputRaw = await Actor.getInput();
+    const actorInput = actorInputRaw && typeof actorInputRaw === 'object' ? actorInputRaw : {};
+    const fallbackInput = await readFallbackInputFile();
+    const mergedInput = mergeInputWithFallback({ actorInput, fallbackInput });
+
+    const hasUserSeed = hasMeaningfulValue(actorInput.url) || hasMeaningfulValue(actorInput.keyword);
+    const hasFallbackSeed = hasMeaningfulValue(fallbackInput.url) || hasMeaningfulValue(fallbackInput.keyword);
+
+    // If user provided either URL or keyword, avoid leaking fallback seed values.
+    if (hasUserSeed) {
+        if (!hasMeaningfulValue(actorInput.url)) delete mergedInput.url;
+        if (!hasMeaningfulValue(actorInput.keyword)) delete mergedInput.keyword;
+    }
+
+    if (!hasUserSeed && hasFallbackSeed) {
+        log.info('Actor input not provided. Using fallback INPUT.json.');
+    }
+
+    return mergedInput;
+};
+
+const extractSearchTermFromUrl = (criteriaUrl) => {
+    try {
+        const parsed = new URL(criteriaUrl);
+        const term = parsed.searchParams.get('w') || parsed.searchParams.get('q') || parsed.searchParams.get('searchTerm') || '';
+        return cleanString(term);
+    } catch {
+        return '';
+    }
+};
+
+const inferLocaleFromUrl = (criteriaUrl) => {
+    try {
+        const parsed = new URL(criteriaUrl);
+        const host = parsed.hostname.toLowerCase();
+        const pathParts = parsed.pathname.split('/').filter(Boolean);
+
+        let territory = DEFAULT_TERRITORY;
+        let language = DEFAULT_LANGUAGE;
+
+        if (host === 'www.nextdirect.com') {
+            if (pathParts[0]?.length === 2) territory = pathParts[0].toUpperCase();
+            if (pathParts[1]?.length === 2) language = pathParts[1].toLowerCase();
+            return { territory, language };
+        }
+
+        if (host.endsWith('next.co.uk')) {
+            territory = 'GB';
+        } else if (host.startsWith('www.next.') || host.startsWith('next.')) {
+            const tldPart = host.split('.').slice(1).join('.');
+            if (tldPart === 'co.uk') territory = 'GB';
+            else {
+                const rootTld = host.split('.').pop();
+                if (rootTld) territory = rootTld.toUpperCase();
+            }
+        }
+
+        if (pathParts[0]?.length === 2 && /^[a-z]{2}$/i.test(pathParts[0])) {
+            language = pathParts[0].toLowerCase();
+        }
+
+        return { territory, language };
+    } catch {
+        return { territory: DEFAULT_TERRITORY, language: DEFAULT_LANGUAGE };
+    }
+};
+
+const detectSearchType = (criteriaUrl, keyword, searchTerm) => {
+    if (cleanString(keyword) || cleanString(searchTerm)) return 'Keyword';
+
+    try {
+        const parsed = new URL(criteriaUrl);
+        const path = parsed.pathname.toLowerCase();
+        if (path.includes('/search')) return 'Keyword';
+    } catch {
+        // Ignore URL parsing issue here and let validation fail later.
+    }
+
+    return 'Category';
+};
+
+const buildCriteriaUrl = ({ url, keyword }) => {
+    const rawUrl = cleanString(url);
+    if (rawUrl) {
+        const parsed = makeAbsoluteUrl(rawUrl);
+        if (!parsed) {
+            throw new Error(`Invalid input URL: ${rawUrl}`);
+        }
+        return parsed;
+    }
+
+    const kw = cleanString(keyword);
+    if (!kw) {
+        throw new Error('Provide either `url` or `keyword` in actor input.');
+    }
+
+    return `https://www.next.co.uk/search?w=${encodeURIComponent(kw)}`;
+};
+
+const removeEmptyValues = (value) => {
+    if (Array.isArray(value)) {
+        const arr = value
+            .map(removeEmptyValues)
+            .filter((item) => item !== undefined);
+        return arr.length ? arr : undefined;
+    }
+
+    if (value && typeof value === 'object') {
+        const entries = Object.entries(value)
+            .map(([k, v]) => [k, removeEmptyValues(v)])
+            .filter(([, v]) => v !== undefined);
+        if (!entries.length) return undefined;
+        return Object.fromEntries(entries);
+    }
+
+    if (value === null || value === undefined) return undefined;
+    if (typeof value === 'string' && value.trim() === '') return undefined;
+
+    return value;
+};
+
+const getPrimaryColourway = (itemNumber, colourways) => {
+    if (!Array.isArray(colourways) || colourways.length === 0) return null;
+
+    const byItemNumber = colourways.find((cw) => cw?.itemNumber === itemNumber);
+    if (byItemNumber) return byItemNumber;
+
+    const byAnchor = colourways.find((cw) => {
+        const link = cleanString(cw?.url).toLowerCase();
+        return link.endsWith(`#${String(itemNumber).toLowerCase()}`);
+    });
+    if (byAnchor) return byAnchor;
+
+    return colourways[0];
+};
+
+const buildProductUrl = (colourwayUrl) => {
+    const relative = cleanString(colourwayUrl);
+    if (!relative) return undefined;
+
+    try {
+        return new URL(relative.replace(/^\//, ''), 'https://www.next.co.uk/').href;
+    } catch {
+        return undefined;
+    }
+};
+
+const mapRecord = ({
+    item,
+    productSummaryData,
+    criteriaUrl,
+    searchTerm,
+    realm,
+    territory,
+    language,
+    rank,
+}) => {
+    const summary = productSummaryData?.data?.productSummary || {};
+    const colourway = getPrimaryColourway(item.itemNumber, summary.colourways || []);
+
+    const rawPrice = colourway?.price?.price || {};
+    const salePrice = colourway?.price?.salePrice?.price || {};
+    const wasPrice = colourway?.price?.wasPrice?.price || {};
+
+    const record = {
+        rank,
+        itemNumber: item.itemNumber,
+        type: item.type,
+        newIn: item.newIn,
+        title: summary.title,
+        productName: summary.productName,
+        brand: summary.brand,
+        department: summary.department,
+        fit: summary.fit,
+        productCategory: summary.productCategory,
+        colour: colourway?.colour,
+        rating: colourway?.overallStarRating,
+        url: buildProductUrl(colourway?.url),
+        image: item.itemNumber
+            ? `https://xcdn.next.co.uk/Common/Items/Default/Default/ItemImages/3_4Ratio/Search/Lge/${item.itemNumber}.jpg`
+            : undefined,
+        currency: colourway?.price?.currencyCode,
+        minPrice: rawPrice?.minPrice,
+        maxPrice: rawPrice?.maxPrice,
+        saleMinPrice: salePrice?.minPrice,
+        saleMaxPrice: salePrice?.maxPrice,
+        wasMinPrice: wasPrice?.minPrice,
+        wasMaxPrice: wasPrice?.maxPrice,
+        colourwaysCount: Array.isArray(summary.colourways) ? summary.colourways.length : undefined,
+        availableFits: Array.isArray(colourway?.fits) ? colourway.fits : undefined,
+        criteriaUrl,
+        searchTerm: searchTerm || undefined,
+        realm,
+        territory,
+        language,
+    };
+
+    return removeEmptyValues(record);
+};
+
+const getApiResponse = async ({
+    criteriaUrl,
+    searchTerm,
+    type,
+    start,
+    pageSize,
+    realm,
+    territory,
+    language,
+    proxyConfiguration,
+}) => {
+    const url = `${API_BASE_URL}/api/search/${realm}/${territory}/${language}/v1/item-aggregation`;
+    const siteUrl = new URL(criteriaUrl).origin;
+
+    const params = {
+        criteria: criteriaUrl,
+        type,
+        start,
+        pagesize: pageSize,
+        pageLoadTrigger: 'infinite_scroll',
+        sliceSize: pageSize,
+    };
+
+    if (type === 'Keyword') {
+        params.searchTerm = searchTerm;
+    } else {
+        params.searchTerm = '';
+    }
+
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        let proxyUrl;
+        if (proxyConfiguration) {
+            try {
+                proxyUrl = await proxyConfiguration.newUrl();
+            } catch (error) {
+                if (attempt === 1) {
+                    log.warning('Proxy URL could not be created for this run. Continuing without proxy.', {
+                        error: error.message,
+                    });
+                }
+                proxyUrl = undefined;
+            }
+        }
+
+        try {
+            const response = await gotScraping({
+                url,
+                method: 'GET',
+                searchParams: params,
+                headers: {
+                    accept: 'application/json, text/plain, */*',
+                    'accept-language': `${language}-${territory},${language};q=0.9`,
+                    'x-next-language': language,
+                    'x-next-realm': realm,
+                    'x-next-territory': territory,
+                    'x-next-siteurl': siteUrl,
+                    referer: criteriaUrl,
+                },
+                proxyUrl,
+                timeout: { request: 45000 },
+                throwHttpErrors: false,
+            });
+
+            if (response.statusCode === 200) {
+                return JSON.parse(response.body);
+            }
+
+            const shortBody = String(response.body || '').replace(/\s+/g, ' ').slice(0, 300);
+
+            if (response.statusCode >= 400 && response.statusCode < 500 && response.statusCode !== 429) {
+                throw new Error(`Search API returned ${response.statusCode}: ${shortBody}`);
+            }
+
+            if (attempt === 3) {
+                throw new Error(`Search API failed after retries with status ${response.statusCode}: ${shortBody}`);
+            }
+        } catch (error) {
+            if (attempt === 3) throw error;
+        }
+
+        await sleep(600 * attempt);
+    }
+
+    throw new Error('Search API request failed unexpectedly.');
+};
+
+await Actor.main(async () => {
+    const input = await loadInputWithFallback();
+
+    const criteriaUrl = buildCriteriaUrl({ url: input.url, keyword: input.keyword });
+    const detectedLocale = inferLocaleFromUrl(criteriaUrl);
+
+    const realm = normalizeRealm(input.realm, DEFAULT_REALM);
+    const territory = normalizeTerritory(input.location || input.territory, detectedLocale.territory || DEFAULT_TERRITORY);
+    const language = normalizeLanguage(input.language, detectedLocale.language || DEFAULT_LANGUAGE);
+
+    const urlSearchTerm = extractSearchTermFromUrl(criteriaUrl);
+    const keyword = cleanString(input.keyword);
+    const searchTerm = keyword || urlSearchTerm;
+    const type = detectSearchType(criteriaUrl, keyword, searchTerm);
+
+    if (type === 'Keyword' && !searchTerm) {
+        throw new Error('Could not detect search term. Provide `keyword` or use a search URL with `w=`.');
+    }
+
+    const resultsWanted = toPositiveInt(input.results_wanted, DEFAULT_RESULTS_WANTED);
+    const maxPages = toPositiveInt(input.max_pages, DEFAULT_MAX_PAGES);
+    const pageSize = Math.min(MAX_PAGE_SIZE, resultsWanted);
+
+    const startPageRaw = toPositiveInt(new URL(criteriaUrl).searchParams.get('p'), 1);
+    const initialStart = Math.max(0, (startPageRaw - 1) * pageSize);
+
+    let proxyConfiguration;
+    if (input.proxyConfiguration) {
+        const wantsApifyProxy = typeof input.proxyConfiguration === 'object' && input.proxyConfiguration?.useApifyProxy;
+
+        if (wantsApifyProxy && !hasApifyProxyCredentials) {
+            log.warning('Apify Proxy requested but no APIFY_TOKEN/APIFY_PROXY_PASSWORD found. Continuing without proxy.');
+        } else {
+            try {
+                proxyConfiguration = await Actor.createProxyConfiguration(input.proxyConfiguration);
+            } catch (error) {
+                log.warning('Proxy configuration is invalid or unavailable. Continuing without proxy.', {
+                    error: error.message,
+                });
+                proxyConfiguration = undefined;
+            }
+        }
+    }
+
+    log.info('Starting Next product extraction via search API.', {
+        criteriaUrl,
+        type,
+        searchTerm: searchTerm || '(none)',
+        realm,
+        territory,
+        language,
+        resultsWanted,
+        maxPages,
+        pageSize,
+        initialStart,
+    });
+
+    const seen = new Set();
+    let saved = 0;
+
+    for (let page = 0; page < maxPages && saved < resultsWanted; page++) {
+        const start = initialStart + (page * pageSize);
+
+        const apiData = await getApiResponse({
+            criteriaUrl,
+            searchTerm,
+            type,
+            start,
+            pageSize,
+            realm,
+            territory,
+            language,
+            proxyConfiguration,
+        });
+
+        const items = Array.isArray(apiData.items) ? apiData.items : [];
+        const summaries = Array.isArray(apiData.productSummaries) ? apiData.productSummaries : [];
+
+        if (!items.length) {
+            log.info(`No results on page ${page + 1}. Stopping pagination.`);
+            break;
+        }
+
+        const batch = [];
+
+        for (let index = 0; index < items.length && saved + batch.length < resultsWanted; index++) {
+            const item = items[index];
+            const dedupeKey = `${item?.itemNumber || 'unknown'}::${item?.type || 'unknown'}`;
+            if (seen.has(dedupeKey)) continue;
+
+            const mapped = mapRecord({
+                item,
+                productSummaryData: summaries[index],
+                criteriaUrl,
+                searchTerm,
+                realm,
+                territory,
+                language,
+                rank: start + index + 1,
+            });
+
+            if (!mapped) continue;
+
+            seen.add(dedupeKey);
+            batch.push(mapped);
+        }
+
+        if (batch.length > 0) {
+            await Actor.pushData(batch);
+            saved += batch.length;
+            log.info(`Saved ${batch.length} items from page ${page + 1}. Total: ${saved}/${resultsWanted}`);
+        }
+
+        if (items.length < pageSize) {
+            log.info('Reached last page based on returned item count.');
+            break;
+        }
+    }
+
+    log.info(`Extraction finished. Total items saved: ${saved}`);
+});

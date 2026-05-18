@@ -1,0 +1,182 @@
+{
+  "actorSpecification": 1,
+  "fields": {
+    "type": "object",
+    "properties": {
+      "rank": {
+        "title": "Rank",
+        "type": "integer",
+        "description": "Rank position in the search/category response"
+      },
+      "itemNumber": {
+        "title": "Item Number",
+        "type": "string",
+        "description": "Next product item number"
+      },
+      "title": {
+        "title": "Title",
+        "type": "string",
+        "description": "Product title"
+      },
+      "brand": {
+        "title": "Brand",
+        "type": "string",
+        "description": "Brand name"
+      },
+      "colour": {
+        "title": "Colour",
+        "type": "string",
+        "description": "Selected colourway"
+      },
+      "currency": {
+        "title": "Currency",
+        "type": "string",
+        "description": "Currency code"
+      },
+      "minPrice": {
+        "title": "Min Price",
+        "type": "number",
+        "description": "Minimum list price"
+      },
+      "maxPrice": {
+        "title": "Max Price",
+        "type": "number",
+        "description": "Maximum list price"
+      },
+      "rating": {
+        "title": "Rating",
+        "type": "number",
+        "description": "Overall star rating"
+      },
+      "department": {
+        "title": "Department",
+        "type": "string",
+        "description": "Product department"
+      },
+      "productCategory": {
+        "title": "Category",
+        "type": "string",
+        "description": "Product category"
+      },
+      "url": {
+        "title": "URL",
+        "type": "string",
+        "description": "Product URL"
+      },
+      "image": {
+        "title": "Image",
+        "type": "string",
+        "description": "Product image URL"
+      },
+      "newIn": {
+        "title": "New In",
+        "type": "boolean",
+        "description": "Whether the product is marked as new"
+      },
+      "territory": {
+        "title": "Territory",
+        "type": "string",
+        "description": "Territory used for extraction"
+      },
+      "searchTerm": {
+        "title": "Search Term",
+        "type": "string",
+        "description": "Keyword used for search mode"
+      }
+    }
+  },
+  "views": {
+    "overview": {
+      "title": "Overview",
+      "transformation": {
+        "fields": [
+          "rank",
+          "itemNumber",
+          "title",
+          "brand",
+          "colour",
+          "currency",
+          "minPrice",
+          "maxPrice",
+          "rating",
+          "department",
+          "productCategory",
+          "url",
+          "image",
+          "newIn",
+          "territory",
+          "searchTerm"
+        ]
+      },
+      "display": {
+        "component": "table",
+        "properties": {
+          "rank": {
+            "label": "Rank",
+            "format": "number"
+          },
+          "itemNumber": {
+            "label": "Item Number",
+            "format": "text"
+          },
+          "title": {
+            "label": "Title",
+            "format": "text"
+          },
+          "brand": {
+            "label": "Brand",
+            "format": "text"
+          },
+          "colour": {
+            "label": "Colour",
+            "format": "text"
+          },
+          "currency": {
+            "label": "Currency",
+            "format": "text"
+          },
+          "minPrice": {
+            "label": "Min Price",
+            "format": "number"
+          },
+          "maxPrice": {
+            "label": "Max Price",
+            "format": "number"
+          },
+          "rating": {
+            "label": "Rating",
+            "format": "number"
+          },
+          "department": {
+            "label": "Department",
+            "format": "text"
+          },
+          "productCategory": {
+            "label": "Category",
+            "format": "text"
+          },
+          "url": {
+            "label": "URL",
+            "format": "link"
+          },
+          "image": {
+            "label": "Image",
+            "format": "image"
+          },
+          "newIn": {
+            "label": "New In",
+            "format": "text"
+          },
+          "territory": {
+            "label": "Territory",
+            "format": "text"
+          },
+          "searchTerm": {
+            "label": "Search Term",
+            "format": "text"
+          }
+        }
+      }
+    }
+  }
+}
