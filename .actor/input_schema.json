@@ -43,7 +43,7 @@
     "max_pages": {
       "title": "Max pages",
       "type": "integer",
-      "description": "Maximum number of API pages to request.",
+      "description": "Maximum number of result pages to process, with up to 100 products per page.",
       "minimum": 1,
       "default": 10,
       "prefill": 10,

@@ -10,6 +10,7 @@ const DEFAULT_LANGUAGE = 'en';
 const DEFAULT_RESULTS_WANTED = 20;
 const DEFAULT_MAX_PAGES = 10;
 const MAX_PAGE_SIZE = 100;
+const MAX_API_CHUNK_SIZE = 50;
 const MAX_API_ATTEMPTS = 4;
 const MAX_RETRY_DELAY_MS = 10_000;
 const RETRYABLE_ERROR_CODES = new Set([
@@ -497,63 +498,72 @@ await Actor.main(async () => {
 
     const seen = new Set();
     let saved = 0;
+    let stopPagination = false;
 
-    for (let page = 0; page < maxPages && saved < resultsWanted; page++) {
-        const start = initialStart + (page * pageSize);
+    for (let page = 0; page < maxPages && saved < resultsWanted && !stopPagination; page++) {
+        const pageStart = initialStart + (page * pageSize);
+        const chunkCount = Math.ceil(pageSize / MAX_API_CHUNK_SIZE);
 
-        const apiData = await getApiResponse({
-            criteriaUrl,
-            searchTerm,
-            type,
-            start,
-            pageSize,
-            realm,
-            territory,
-            language,
-            apiClient,
-        });
-
-        const items = Array.isArray(apiData.items) ? apiData.items : [];
-        const summaries = Array.isArray(apiData.productSummaries) ? apiData.productSummaries : [];
-
-        if (!items.length) {
-            log.info(`No results on page ${page + 1}. Stopping pagination.`);
-            break;
-        }
-
-        const batch = [];
-
-        for (let index = 0; index < items.length && saved + batch.length < resultsWanted; index++) {
-            const item = items[index];
-            const dedupeKey = `${item?.itemNumber || 'unknown'}::${item?.type || 'unknown'}`;
-            if (seen.has(dedupeKey)) continue;
-
-            const mapped = mapRecord({
-                item,
-                productSummaryData: summaries[index],
+        for (let chunkOffset = 0; chunkOffset < pageSize && saved < resultsWanted; chunkOffset += MAX_API_CHUNK_SIZE) {
+            const start = pageStart + chunkOffset;
+            const requestPageSize = Math.min(MAX_API_CHUNK_SIZE, pageSize - chunkOffset);
+            const apiData = await getApiResponse({
                 criteriaUrl,
                 searchTerm,
+                type,
+                start,
+                pageSize: requestPageSize,
                 realm,
                 territory,
                 language,
-                rank: start + index + 1,
+                apiClient,
             });
 
-            if (!mapped) continue;
+            const items = Array.isArray(apiData.items) ? apiData.items : [];
+            const summaries = Array.isArray(apiData.productSummaries) ? apiData.productSummaries : [];
 
-            seen.add(dedupeKey);
-            batch.push(mapped);
-        }
+            if (!items.length) {
+                log.info(`No results on page ${page + 1}. Stopping pagination.`);
+                stopPagination = true;
+                break;
+            }
 
-        if (batch.length > 0) {
-            await Actor.pushData(batch);
-            saved += batch.length;
-            log.info(`Saved ${batch.length} items from page ${page + 1}. Total: ${saved}/${resultsWanted}`);
-        }
+            const batch = [];
 
-        if (items.length < pageSize) {
-            log.info('Reached last page based on returned item count.');
-            break;
+            for (let index = 0; index < items.length && saved + batch.length < resultsWanted; index++) {
+                const item = items[index];
+                const dedupeKey = `${item?.itemNumber || 'unknown'}::${item?.type || 'unknown'}`;
+                if (seen.has(dedupeKey)) continue;
+
+                const mapped = mapRecord({
+                    item,
+                    productSummaryData: summaries[index],
+                    criteriaUrl,
+                    searchTerm,
+                    realm,
+                    territory,
+                    language,
+                    rank: start + index + 1,
+                });
+
+                if (!mapped) continue;
+
+                seen.add(dedupeKey);
+                batch.push(mapped);
+            }
+
+            if (batch.length > 0) {
+                await Actor.pushData(batch);
+                saved += batch.length;
+                const chunkNumber = Math.floor(chunkOffset / MAX_API_CHUNK_SIZE) + 1;
+                log.info(`Saved ${batch.length} items from page ${page + 1}, chunk ${chunkNumber}/${chunkCount}. Total: ${saved}/${resultsWanted}`);
+            }
+
+            if (items.length < requestPageSize) {
+                log.info('Reached last page based on returned item count.');
+                stopPagination = true;
+                break;
+            }
         }
     }
 

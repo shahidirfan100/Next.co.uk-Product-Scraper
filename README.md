@@ -65,7 +65,7 @@ The Actor saves one dataset item per product. Fields that are empty or unavailab
 | `location`           | String  | No       | `GB`                                                     | Territory code used for the catalog, such as `GB`, `OM`, `PL`, or `AE`.                |
 | `language`           | String  | No       | `en`                                                     | Language code used for the catalog.                                                    |
 | `results_wanted`     | Integer | No       | `20`                                                     | Maximum number of product records to save. Minimum: `1`.                               |
-| `max_pages`          | Integer | No       | `10`                                                     | Maximum number of result pages to request. Minimum: `1`.                               |
+| `max_pages`          | Integer | No       | `10`                                                     | Maximum number of result pages to process, with up to 100 products per page. Minimum: `1`. |
 | `proxyConfiguration` | Object  | No       | `{ "useApifyProxy": false }`                             | Optional Apify Proxy configuration.                                                    |
 
 `url` is prefilled in the Apify input form as an example, but it is not a runtime default. For a keyword search, remove the URL value so it does not take priority over the keyword.
