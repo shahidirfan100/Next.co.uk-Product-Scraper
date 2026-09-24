@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 
 import { Actor, log } from 'apify';
-import { gotScraping } from 'got-scraping';
+import { Impit } from 'impit';
 
 const API_BASE_URL = 'https://api.nextdirect.com';
 const DEFAULT_REALM = 'next';
@@ -10,11 +10,62 @@ const DEFAULT_LANGUAGE = 'en';
 const DEFAULT_RESULTS_WANTED = 20;
 const DEFAULT_MAX_PAGES = 10;
 const MAX_PAGE_SIZE = 100;
+const MAX_API_ATTEMPTS = 4;
+const MAX_RETRY_DELAY_MS = 10_000;
+const RETRYABLE_ERROR_CODES = new Set([
+    'ECONNABORTED',
+    'ECONNREFUSED',
+    'ECONNRESET',
+    'EAI_AGAIN',
+    'EPIPE',
+    'ETIMEDOUT',
+    'ERR_SOCKET_CLOSED',
+    'ENETUNREACH',
+]);
+const RETRYABLE_ERROR_NAMES = new Set([
+    'CloseError',
+    'ConnectError',
+    'ConnectTimeout',
+    'NetworkError',
+    'PoolTimeout',
+    'ReadError',
+    'ReadTimeout',
+    'RemoteProtocolError',
+    'TimeoutError',
+    'WriteError',
+    'WriteTimeout',
+]);
 const hasApifyProxyCredentials = Boolean(process.env.APIFY_TOKEN || process.env.APIFY_PROXY_PASSWORD);
 
 const sleep = (ms) => new Promise((resolve) => {
     setTimeout(resolve, ms);
 });
+
+const getRetryDelay = (attempt, retryAfter) => {
+    if (retryAfter) {
+        const retryAfterSeconds = Number(retryAfter);
+        let retryAfterMs;
+
+        if (Number.isFinite(retryAfterSeconds)) {
+            retryAfterMs = retryAfterSeconds * 1000;
+        } else {
+            const retryAfterDate = Date.parse(retryAfter);
+            if (Number.isFinite(retryAfterDate)) retryAfterMs = retryAfterDate - Date.now();
+        }
+
+        if (retryAfterMs !== undefined && retryAfterMs >= 0) {
+            return Math.min(MAX_RETRY_DELAY_MS, retryAfterMs);
+        }
+    }
+
+    const exponentialDelay = Math.min(1000 * (2 ** (attempt - 1)), 8000);
+    return exponentialDelay + Math.floor(Math.random() * 500);
+};
+
+const isRetryableNetworkError = (error) => (
+    RETRYABLE_ERROR_NAMES.has(error?.name)
+    || RETRYABLE_ERROR_CODES.has(error?.code ?? error?.cause?.code)
+);
 
 const toPositiveInt = (value, fallback) => {
     const parsed = Number(value);
@@ -293,7 +344,7 @@ const getApiResponse = async ({
     realm,
     territory,
     language,
-    proxyConfiguration,
+    apiClient,
 }) => {
     const url = `${API_BASE_URL}/api/search/${realm}/${territory}/${language}/v1/item-aggregation`;
     const siteUrl = new URL(criteriaUrl).origin;
@@ -313,26 +364,17 @@ const getApiResponse = async ({
         params.searchTerm = '';
     }
 
-    for (let attempt = 1; attempt <= 3; attempt++) {
-        let proxyUrl;
-        if (proxyConfiguration) {
-            try {
-                proxyUrl = await proxyConfiguration.newUrl();
-            } catch (error) {
-                if (attempt === 1) {
-                    log.warning('Proxy URL could not be created for this run. Continuing without proxy.', {
-                        error: error.message,
-                    });
-                }
-                proxyUrl = undefined;
-            }
-        }
+    const requestUrl = new URL(url);
+    for (const [key, value] of Object.entries(params)) {
+        requestUrl.searchParams.set(key, String(value));
+    }
 
+    for (let attempt = 1; attempt <= MAX_API_ATTEMPTS; attempt++) {
+        let response;
+        let responseBody;
         try {
-            const response = await gotScraping({
-                url,
+            response = await apiClient.fetch(requestUrl.href, {
                 method: 'GET',
-                searchParams: params,
                 headers: {
                     accept: 'application/json, text/plain, */*',
                     'accept-language': `${language}-${territory},${language};q=0.9`,
@@ -342,29 +384,39 @@ const getApiResponse = async ({
                     'x-next-siteurl': siteUrl,
                     referer: criteriaUrl,
                 },
-                proxyUrl,
-                timeout: { request: 45000 },
-                throwHttpErrors: false,
+                timeout: 45000,
             });
-
-            if (response.statusCode === 200) {
-                return JSON.parse(response.body);
-            }
-
-            const shortBody = String(response.body || '').replace(/\s+/g, ' ').slice(0, 300);
-
-            if (response.statusCode >= 400 && response.statusCode < 500 && response.statusCode !== 429) {
-                throw new Error(`Search API returned ${response.statusCode}: ${shortBody}`);
-            }
-
-            if (attempt === 3) {
-                throw new Error(`Search API failed after retries with status ${response.statusCode}: ${shortBody}`);
-            }
+            responseBody = await response.text();
         } catch (error) {
-            if (attempt === 3) throw error;
+            if (!isRetryableNetworkError(error) || attempt === MAX_API_ATTEMPTS) throw error;
+
+            const retryDelay = getRetryDelay(attempt);
+            log.warning(`Temporary Search API request error. Retrying in ${Math.ceil(retryDelay / 1000)}s (attempt ${attempt}/${MAX_API_ATTEMPTS}).`);
+            await sleep(retryDelay);
+            continue;
         }
 
-        await sleep(600 * attempt);
+        if (response.status === 200) {
+            try {
+                return JSON.parse(responseBody);
+            } catch {
+                throw new Error('Search API returned invalid JSON.');
+            }
+        }
+
+        const shortBody = String(responseBody || '').replace(/\s+/g, ' ').slice(0, 300);
+
+        if (response.status >= 400 && response.status < 500 && response.status !== 429) {
+            throw new Error(`Search API returned ${response.status}: ${shortBody}`);
+        }
+
+        if ((response.status !== 429 && response.status < 500) || attempt === MAX_API_ATTEMPTS) {
+            throw new Error(`Search API failed after retries with status ${response.status}: ${shortBody}`);
+        }
+
+        const retryDelay = getRetryDelay(attempt, response.headers.get('retry-after'));
+        log.warning(`Search API returned HTTP ${response.status}. Retrying in ${Math.ceil(retryDelay / 1000)}s (attempt ${attempt}/${MAX_API_ATTEMPTS}).`);
+        await sleep(retryDelay);
     }
 
     throw new Error('Search API request failed unexpectedly.');
@@ -414,6 +466,22 @@ await Actor.main(async () => {
         }
     }
 
+    let proxyUrl;
+    if (proxyConfiguration) {
+        try {
+            proxyUrl = await proxyConfiguration.newUrl();
+        } catch (error) {
+            log.warning('Proxy URL could not be created for this run. Continuing without proxy.', {
+                error: error.message,
+            });
+        }
+    }
+
+    const apiClient = new Impit({
+        browser: 'chrome',
+        ...(proxyUrl && { proxyUrl }),
+    });
+
     log.info('Starting Next product extraction via search API.', {
         criteriaUrl,
         type,
@@ -442,7 +510,7 @@ await Actor.main(async () => {
             realm,
             territory,
             language,
-            proxyConfiguration,
+            apiClient,
         });
 
         const items = Array.isArray(apiData.items) ? apiData.items : [];

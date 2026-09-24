@@ -15,8 +15,7 @@
       "title": "Keyword",
       "type": "string",
       "description": "Keyword search term. Used when URL is not provided.",
-      "editor": "textfield",
-      "prefill": "shirt"
+      "editor": "textfield"
     },
     "location": {
       "title": "Location / Territory",
